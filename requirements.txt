@@ -1,0 +1,4 @@
+certifi==2026.6.17
+curl_cffi==0.15.0
+pytubefix==10.3.6
+yt-dlp==2026.6.9

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Local config
+.env
+.env.*
+
+# Editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Downloaded/generated media and transcripts
+downloads/
+*.mp4
+*.m4a
+*.webm
+*.mkv
+*.mp3
+*.wav
+*.pdf
+*.json3
+*.vtt
+*.srt
