@@ -18,6 +18,93 @@ PDF_MARGIN = 50
 PDF_FONT_SIZE = 10
 PDF_LINE_HEIGHT = 14
 
+def application_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def bundled_bin_dir() -> str:
+    return os.path.join(application_dir(), "bin")
+
+def find_executable(name: str) -> str | None:
+    extension = ".exe" if os.name == "nt" else ""
+    bundled_executable = os.path.join(bundled_bin_dir(), f"{name}{extension}")
+    if os.path.exists(bundled_executable):
+        return bundled_executable
+    return shutil.which(name)
+
+def setup_portable_environment() -> None:
+    bin_dir = bundled_bin_dir()
+    if os.path.isdir(bin_dir):
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    try:
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    except ImportError:
+        pass
+
+def run_ytdlp(args: list[str], env: dict | None = None) -> int:
+    if getattr(sys, "frozen", False):
+        import yt_dlp
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = ["yt-dlp", *args]
+            try:
+                yt_dlp.main(args)
+            except SystemExit as e:
+                return int(e.code or 0) if isinstance(e.code, int) else 1
+            return 0
+        finally:
+            sys.argv = old_argv
+
+    cmd = [sys.executable, "-m", "yt_dlp", *args]
+    result = subprocess.run(cmd, env=env)
+    return result.returncode
+
+def run_self_test() -> int:
+    setup_portable_environment()
+    print("YouTubeDownloader self-test")
+    print(f"Application dir: {application_dir()}")
+
+    ffmpeg_path = find_executable("ffmpeg")
+    node_path = find_executable("node")
+    print(f"ffmpeg: {ffmpeg_path or 'not found'}")
+    print(f"node: {node_path or 'not found'}")
+
+    if not ffmpeg_path or not node_path:
+        return 1
+
+    ffmpeg_result = subprocess.run(
+        [ffmpeg_path, "-version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+    node_result = subprocess.run(
+        [node_path, "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+
+    print(ffmpeg_result.stdout.splitlines()[0] if ffmpeg_result.stdout else "ffmpeg version unavailable")
+    print(f"node {node_result.stdout.strip()}")
+
+    try:
+        import certifi
+        import pytubefix
+        import yt_dlp
+        print(f"certifi: {certifi.where()}")
+        print(f"pytubefix: {getattr(pytubefix, '__version__', 'installed')}")
+        print(f"yt-dlp: {yt_dlp.version.__version__}")
+    except Exception as e:
+        print(f"Dependency import failed: {e}")
+        return 1
+
+    print("Self-test OK")
+    return 0
+
 def sanitize_filename(name: str) -> str:
     """
     Limpia el título para usarlo como nombre de archivo.
@@ -182,9 +269,7 @@ def download_caption_json(track: dict) -> dict:
 def download_caption_json_with_ytdlp(url: str, language_code: str) -> dict:
     with tempfile.TemporaryDirectory() as temp_dir:
         output_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
-        cmd = [
-            sys.executable,
-            "-m", "yt_dlp",
+        args = [
             "--skip-download",
             "--write-auto-subs",
             "--sub-langs", language_code,
@@ -193,9 +278,9 @@ def download_caption_json_with_ytdlp(url: str, language_code: str) -> dict:
             "-o", output_template,
             url,
         ]
-        node_path = shutil.which("node")
+        node_path = find_executable("node")
         if node_path:
-            cmd[3:3] = [
+            args[0:0] = [
                 "--js-runtimes", f"node:{node_path}",
                 "--remote-components", "ejs:github",
                 "--impersonate", "chrome",
@@ -207,15 +292,9 @@ def download_caption_json_with_ytdlp(url: str, language_code: str) -> dict:
         except ImportError:
             pass
 
-        result = subprocess.run(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        returncode = run_ytdlp(args, env=env)
+        if returncode != 0:
+            raise RuntimeError(f"yt-dlp terminó con código {returncode}")
 
         for filename in os.listdir(temp_dir):
             if filename.endswith(f".{language_code}.json3"):
@@ -350,7 +429,7 @@ def select_audio_stream(streams, language_code: str = "es"):
 
 def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, language_code: str) -> bool:
     """Descarga pistas de doblaje automático que no aparecen en pytubefix."""
-    node_path = shutil.which("node")
+    node_path = find_executable("node")
     if not node_path:
         print("⚠️  No se encontró Node.js, necesario para resolver algunas pistas de YouTube con yt-dlp.")
         return False
@@ -367,9 +446,7 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
     )
 
     print("\nProbando descarga con yt-dlp para pistas de doblaje automático...")
-    base_cmd = [
-        sys.executable,
-        "-m", "yt_dlp",
+    base_args = [
         "--js-runtimes", f"node:{node_path}",
         "--remote-components", "ejs:github",
         "--merge-output-format", "mp4",
@@ -378,8 +455,8 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
         url,
     ]
     commands = [
-        base_cmd,
-        base_cmd[:5] + ["--impersonate", "chrome"] + base_cmd[5:],
+        base_args,
+        base_args[:4] + ["--impersonate", "chrome"] + base_args[4:],
     ]
 
     env = os.environ.copy()
@@ -389,14 +466,9 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
     except ImportError:
         pass
 
-    for index, cmd in enumerate(commands, start=1):
-        try:
-            result = subprocess.run(cmd, env=env)
-        except FileNotFoundError:
-            print("❌ No se pudo ejecutar yt-dlp desde este entorno virtual.")
-            return False
-
-        if result.returncode == 0:
+    for index, args in enumerate(commands, start=1):
+        returncode = run_ytdlp(args, env=env)
+        if returncode == 0:
             print("✅ Descarga con doblaje automático completada.")
             print(f"📁 Archivo guardado en: {download_path}")
             return True
@@ -519,9 +591,15 @@ def download_youtube_video_separated():
 
         safe_title = sanitize_filename(yt.title)
         output_file = os.path.join(download_path, f"{safe_title}_1080p_merged.mp4")
+        ffmpeg_path = find_executable("ffmpeg")
+        if not ffmpeg_path:
+            print("❌ No se encontró el ejecutable 'ffmpeg'.")
+            print("Incluye ffmpeg en la carpeta 'bin' junto al ejecutable o instálalo en el PATH.")
+            print("ℹ️ Los archivos de solo vídeo y audio se mantienen.")
+            return
 
         cmd = [
-            "ffmpeg",
+            ffmpeg_path,
             "-y",
             "-i", video_file,
             "-i", audio_file,
@@ -575,4 +653,7 @@ def download_youtube_video_separated():
         print(f"❌ Error inesperado: {e}")
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        raise SystemExit(run_self_test())
+    setup_portable_environment()
     download_youtube_video_separated()

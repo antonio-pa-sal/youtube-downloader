@@ -121,3 +121,41 @@ git branch -M main
 git remote add origin <URL_DEL_REPOSITORIO>
 git push -u origin main
 ```
+
+## Crear ejecutable portable para macOS Apple silicon
+
+Desde un Mac Apple silicon, con el entorno virtual creado:
+
+```bash
+source venv/bin/activate
+./scripts/build_macos_portable.sh
+```
+
+El resultado queda en:
+
+```text
+dist/YouTubeDownloader-macos-arm64-portable/
+```
+
+Esa carpeta es la que puedes copiar al pendrive. Incluye:
+
+```text
+YouTubeDownloader
+bin/ffmpeg
+bin/node
+```
+
+En otro Mac Apple silicon, ejecuta desde Terminal:
+
+```bash
+cd /ruta/al/pendrive/YouTubeDownloader-macos-arm64-portable
+./YouTubeDownloader --self-test
+./YouTubeDownloader
+```
+
+Si macOS bloquea el ejecutable por no estar firmado:
+
+```bash
+xattr -dr com.apple.quarantine .
+./YouTubeDownloader
+```
