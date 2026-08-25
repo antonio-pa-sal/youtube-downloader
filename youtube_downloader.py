@@ -1,5 +1,5 @@
 from pytubefix import YouTube
-from pytubefix.exceptions import VideoUnavailable, RegexMatchError
+from pytubefix.exceptions import BotDetection, VideoUnavailable, RegexMatchError
 import html
 import json
 import os
@@ -479,6 +479,73 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
     print("❌ yt-dlp no pudo descargar una pista de doblaje automático para ese idioma.")
     return False
 
+def download_video_with_ytdlp_fallback(url: str, download_path: str, language_code: str) -> bool:
+    """Descarga el vídeo completo cuando pytubefix bloquea la consulta por bot."""
+    try:
+        from yt_dlp import YoutubeDL
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+    except ImportError:
+        print("❌ yt-dlp no está instalado; no se puede usar el fallback.")
+        return False
+
+    node_path = find_executable("node")
+    extractor_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+    if node_path:
+        extractor_opts.update({
+            "js_runtimes": {"node": {"path": node_path}},
+            "remote_components": ["ejs:github"],
+            "impersonate": ImpersonateTarget.from_str("chrome"),
+        })
+
+    try:
+        with YoutubeDL(extractor_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as error:
+        print(f"❌ yt-dlp tampoco pudo acceder al vídeo: {error}")
+        return False
+
+    title = info.get("title") or "video_descargado"
+    safe_title = sanitize_filename(title)
+    print(f"Título obtenido con yt-dlp: **{title}**")
+
+    try:
+        generate_transcription_pdfs(url, download_path, title, language_code)
+    except Exception as error:
+        print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
+
+    format_selector = (
+        f"bestvideo[height<=1080]+bestaudio[language^={language_code}]/"
+        f"bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+    )
+    download_opts = {
+        "format": format_selector,
+        "outtmpl": os.path.join(download_path, f"{safe_title}_1080p_yt-dlp.%(ext)s"),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": False,
+        "no_warnings": False,
+    }
+    if node_path:
+        download_opts.update({
+            "js_runtimes": {"node": {"path": node_path}},
+            "remote_components": ["ejs:github"],
+            "impersonate": ImpersonateTarget.from_str("chrome"),
+        })
+
+    try:
+        with YoutubeDL(download_opts) as ydl:
+            ydl.download([url])
+    except Exception as error:
+        print(f"❌ Falló la descarga de respaldo con yt-dlp: {error}")
+        return False
+
+    print(f"✅ Descarga de respaldo completada en: {download_path}")
+    return True
+
 def download_youtube_video_separated():
     """
     Descarga por separado el track de video (1080p) y el track de audio
@@ -645,6 +712,12 @@ def download_youtube_video_separated():
         print("\n✨ ¡Proceso finalizado!")
         print(f"Archivos en: {download_path}")
 
+    except BotDetection:
+        print("⚠️ pytubefix ha detectado tráfico automatizado; usando yt-dlp como respaldo...")
+        if download_video_with_ytdlp_fallback(url, download_path, audio_language):
+            print("\n✨ ¡Proceso finalizado!")
+        else:
+            print("❌ No se pudo descargar el vídeo con el método de respaldo.")
     except VideoUnavailable:
         print("❌ Error: Video no disponible.")
     except RegexMatchError:
