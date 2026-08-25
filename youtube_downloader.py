@@ -12,6 +12,17 @@ import re
 import urllib.request
 
 SPANISH_AUDIO_NAMES = {"spanish", "español", "espanol", "castellano", "latino"}
+SUPPORTED_COOKIE_BROWSERS = {
+    "chrome", "chromium", "edge", "brave", "opera", "vivaldi", "firefox", "safari"
+}
+DOWNLOAD_CHOICES = {
+    1: "Transcripción original",
+    2: "Transcripción traducida",
+    3: "Audio original",
+    4: "Audio traducido",
+    5: "Vídeo + audio original",
+    6: "Vídeo + audio traducido",
+}
 PDF_PAGE_WIDTH = 595
 PDF_PAGE_HEIGHT = 842
 PDF_MARGIN = 50
@@ -32,6 +43,61 @@ def find_executable(name: str) -> str | None:
     if os.path.exists(bundled_executable):
         return bundled_executable
     return shutil.which(name)
+
+def normalize_cookie_browser(browser: str) -> str | None:
+    browser = browser.strip().lower()
+    if not browser:
+        return None
+    if browser not in SUPPORTED_COOKIE_BROWSERS:
+        print(
+            f"⚠️ Navegador no soportado: {browser}. "
+            f"Usa uno de: {', '.join(sorted(SUPPORTED_COOKIE_BROWSERS))}. Se continuará sin cookies."
+        )
+        return None
+    return browser
+
+def select_download_options() -> set[int] | None:
+    """Muestra un menú tipo checkbox y devuelve las opciones elegidas."""
+    selected = set()
+    print("\n¿Qué quieres descargar? Marca una o varias opciones:")
+    print("  Escribe un número para marcar/desmarcarlo; usa d para continuar.")
+    print("  También puedes escribir varios números separados por comas.")
+
+    while True:
+        print()
+        for number, label in DOWNLOAD_CHOICES.items():
+            marker = "x" if number in selected else " "
+            print(f"  [{marker}] {number}. {label}")
+        print("  [a] Todas   [n] Ninguna   [d] Continuar   [q] Cancelar")
+
+        answer = input("Acción: ").strip().lower()
+        if answer == "q":
+            return None
+        if answer == "a":
+            selected = set(DOWNLOAD_CHOICES)
+            continue
+        if answer == "n":
+            selected.clear()
+            continue
+        if answer == "d":
+            if selected:
+                return selected
+            print("Elige al menos una opción antes de continuar.")
+            continue
+        if not answer:
+            print("Usa un número, a, n, d o q.")
+            continue
+
+        tokens = {token.strip() for token in answer.replace(",", " ").split() if token.strip()}
+        if tokens and all(token.isdigit() and int(token) in DOWNLOAD_CHOICES for token in tokens):
+            for token in tokens:
+                number = int(token)
+                if number in selected:
+                    selected.remove(number)
+                else:
+                    selected.add(number)
+            continue
+        print("Selección no válida. Usa números del 1 al 6.")
 
 def setup_portable_environment() -> None:
     bin_dir = bundled_bin_dir()
@@ -303,7 +369,13 @@ def download_caption_json_with_ytdlp(url: str, language_code: str) -> dict:
 
     raise FileNotFoundError(f"No se generó el subtítulo {language_code} con yt-dlp.")
 
-def generate_transcription_pdfs(url: str, download_path: str, title: str, language_code: str) -> None:
+def generate_transcription_pdfs(
+    url: str,
+    download_path: str,
+    title: str,
+    language_code: str,
+    selected_options: set[int] | None = None,
+) -> None:
     try:
         from yt_dlp import YoutubeDL
     except ImportError:
@@ -331,10 +403,16 @@ def generate_transcription_pdfs(url: str, download_path: str, title: str, langua
         print("⚠️  YouTube no devolvió subtítulos automáticos para generar PDF.")
         return
 
-    transcript_requests = [
-        ("original", "Transcripción del audio original", ["en-orig", "en-US", "en"]),
-        (language_code, f"Transcripción/traducción en {language_code}", [language_code, f"{language_code}-US", "es", "es-US"]),
-    ]
+    selected_options = selected_options or {1, 2}
+    transcript_requests = []
+    if 1 in selected_options:
+        transcript_requests.append(
+            ("original", "Transcripción del audio original", ["en-orig", "en-US", "en"])
+        )
+    if 2 in selected_options:
+        transcript_requests.append(
+            (language_code, f"Transcripción/traducción en {language_code}", [language_code, f"{language_code}-US", "es", "es-US"])
+        )
 
     created_files = []
     for suffix, heading, codes in transcript_requests:
@@ -427,7 +505,13 @@ def select_audio_stream(streams, language_code: str = "es"):
 
     return max(fallback_streams, key=lambda stream: abr_to_int(stream.abr)), False, audio_streams
 
-def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, language_code: str) -> bool:
+def download_auto_dub_with_ytdlp(
+    url: str,
+    download_path: str,
+    title: str,
+    language_code: str,
+    browser: str | None = None,
+) -> bool:
     """Descarga pistas de doblaje automático que no aparecen en pytubefix."""
     node_path = find_executable("node")
     if not node_path:
@@ -454,6 +538,8 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
         "-o", output_template,
         url,
     ]
+    if browser:
+        base_args[0:0] = ["--cookies-from-browser", browser]
     commands = [
         base_args,
         base_args[:4] + ["--impersonate", "chrome"] + base_args[4:],
@@ -479,8 +565,14 @@ def download_auto_dub_with_ytdlp(url: str, download_path: str, title: str, langu
     print("❌ yt-dlp no pudo descargar una pista de doblaje automático para ese idioma.")
     return False
 
-def download_video_with_ytdlp_fallback(url: str, download_path: str, language_code: str) -> bool:
-    """Descarga el vídeo completo cuando pytubefix bloquea la consulta por bot."""
+def download_video_with_ytdlp_fallback(
+    url: str,
+    download_path: str,
+    language_code: str,
+    selected_options: set[int] | None = None,
+    browser: str | None = None,
+) -> bool:
+    """Descarga las opciones elegidas con varios perfiles de yt-dlp."""
     try:
         from yt_dlp import YoutubeDL
         from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -488,24 +580,64 @@ def download_video_with_ytdlp_fallback(url: str, download_path: str, language_co
         print("❌ yt-dlp no está instalado; no se puede usar el fallback.")
         return False
 
+    selected_options = selected_options or {5}
     node_path = find_executable("node")
-    extractor_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-    if node_path:
-        extractor_opts.update({
-            "js_runtimes": {"node": {"path": node_path}},
-            "remote_components": ["ejs:github"],
-            "impersonate": ImpersonateTarget.from_str("chrome"),
-        })
 
-    try:
-        with YoutubeDL(extractor_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as error:
-        print(f"❌ yt-dlp tampoco pudo acceder al vídeo: {error}")
+    def make_options(
+        format_selector: str | None = None,
+        output_template: str | None = None,
+        client: str | None = None,
+        postprocessors: list[dict] | None = None,
+    ):
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+        if format_selector:
+            options.update({
+                "format": format_selector,
+                "merge_output_format": "mp4",
+                "quiet": False,
+                "no_warnings": False,
+            })
+        if output_template:
+            options["outtmpl"] = output_template
+        if postprocessors:
+            options["postprocessors"] = postprocessors
+        if browser:
+            options["cookiesfrombrowser"] = (browser, None, None, None)
+        if client:
+            options["extractor_args"] = {"youtube": {"player_client": [client]}}
+        if node_path:
+            options.update({
+                "js_runtimes": {"node": {"path": node_path}},
+                "remote_components": ["ejs:github"],
+                "impersonate": ImpersonateTarget.from_str("chrome"),
+            })
+        return options
+
+    profiles = [
+        ("predeterminado", None),
+        ("web_embedded", "web_embedded"),
+        ("android_vr", "android_vr"),
+    ]
+    info = None
+    successful_profile = None
+    extraction_errors = []
+    for profile_name, client in profiles:
+        try:
+            with YoutubeDL(make_options(client=client)) as ydl:
+                info = ydl.extract_info(url, download=False)
+            successful_profile = (profile_name, client)
+            break
+        except Exception as error:
+            extraction_errors.append(f"{profile_name}: {error}")
+
+    if not info:
+        print("❌ yt-dlp tampoco pudo acceder al vídeo.")
+        for error in extraction_errors:
+            print(f"   - {error}")
         return False
 
     title = info.get("title") or "video_descargado"
@@ -513,43 +645,90 @@ def download_video_with_ytdlp_fallback(url: str, download_path: str, language_co
     print(f"Título obtenido con yt-dlp: **{title}**")
 
     try:
-        generate_transcription_pdfs(url, download_path, title, language_code)
+        generate_transcription_pdfs(url, download_path, title, language_code, selected_options)
     except Exception as error:
         print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
 
-    format_selector = (
-        f"bestvideo[height<=1080]+bestaudio[language^={language_code}]/"
-        f"bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    )
-    download_opts = {
-        "format": format_selector,
-        "outtmpl": os.path.join(download_path, f"{safe_title}_1080p_yt-dlp.%(ext)s"),
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": False,
-        "no_warnings": False,
-    }
-    if node_path:
-        download_opts.update({
-            "js_runtimes": {"node": {"path": node_path}},
-            "remote_components": ["ejs:github"],
-            "impersonate": ImpersonateTarget.from_str("chrome"),
-        })
+    jobs = []
+    if 3 in selected_options:
+        jobs.append((
+            "audio_original",
+            "bestaudio",
+            f"{safe_title}_audio_original.%(ext)s",
+            [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "0",
+            }],
+        ))
+    if 4 in selected_options:
+        jobs.append((
+            "audio_traducido",
+            f"bestaudio[language^={language_code}]",
+            f"{safe_title}_audio_{language_code}.%(ext)s",
+            [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "0",
+            }],
+        ))
+    if 5 in selected_options:
+        jobs.append((
+            "video_audio_original",
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            f"{safe_title}_1080p_original.%(ext)s",
+            None,
+        ))
+    if 6 in selected_options:
+        jobs.append((
+            "video_audio_traducido",
+            f"bestvideo[height<=1080]+bestaudio[language^={language_code}]",
+            f"{safe_title}_1080p_{language_code}.%(ext)s",
+            None,
+        ))
 
-    try:
-        with YoutubeDL(download_opts) as ydl:
-            ydl.download([url])
-    except Exception as error:
-        print(f"❌ Falló la descarga de respaldo con yt-dlp: {error}")
+    if not jobs:
+        print("✅ Solo se solicitaron transcripciones.")
+        return True
+
+    download_profiles = [successful_profile] + [profile for profile in profiles if profile != successful_profile]
+    failed_jobs = []
+    for job_name, format_selector, filename, postprocessors in jobs:
+        completed = False
+        for profile_name, client in download_profiles:
+            print(f"\nProbando yt-dlp ({job_name}, perfil {profile_name})...")
+            output_template = os.path.join(download_path, filename)
+            try:
+                with YoutubeDL(make_options(
+                    format_selector,
+                    output_template,
+                    client,
+                    postprocessors,
+                )) as ydl:
+                    ydl.download([url])
+                print(f"✅ {job_name} descargado.")
+                completed = True
+                break
+            except Exception as error:
+                message = str(error).splitlines()[-1]
+                print(f"⚠️ Falló {job_name} con {profile_name}: {message}")
+                if "403" in message:
+                    print("   YouTube rechazó el formato; probando otro cliente...")
+        if not completed:
+            failed_jobs.append(job_name)
+
+    if failed_jobs:
+        print(f"❌ No se pudieron descargar: {', '.join(failed_jobs)}")
+        print("ℹ️ Si persiste HTTP 403, prueba cookies del navegador o un proveedor de PO Tokens.")
         return False
 
-    print(f"✅ Descarga de respaldo completada en: {download_path}")
+    print(f"✅ Descargas completadas en: {download_path}")
     return True
 
 def download_youtube_video_separated():
     """
-    Descarga por separado el track de video (1080p) y el track de audio
-    usando pytubefix, y luego los fusiona en un único archivo MP4 con ffmpeg.
+    Solicita las salidas elegidas y las descarga con yt-dlp, fusionando
+    vídeo y audio cuando corresponde.
     """
 
     print("--- Descargador Separado (1080p Video + Audio) ---")
@@ -569,6 +748,15 @@ def download_youtube_video_separated():
     print(f"\nRuta por defecto: {default_path}")
     download_path = input("Ruta de guardado (Intro para usar por defecto): ").strip() or default_path
     audio_language = input("Idioma de audio deseado (Intro para español/es): ").strip().lower() or "es"
+    cookie_browser = normalize_cookie_browser(
+        input("Navegador para cookies (opcional: chrome/firefox/safari): ")
+    )
+    if cookie_browser:
+        print(f"Se usarán las cookies de {cookie_browser} solo como respaldo de yt-dlp.")
+    selected_options = select_download_options()
+    if selected_options is None:
+        print("Operación cancelada.")
+        return
 
     try:
         if not os.path.exists(download_path):
@@ -582,139 +770,19 @@ def download_youtube_video_separated():
         print("\nConectando con YouTube...")
         yt = YouTube(url)
         print(f"Título: **{yt.title}**")
-        generate_transcription_pdfs(url, download_path, yt.title, audio_language)
-
-        # A. BUSCAR VIDEO 1080p (Solo video, sin audio)
-        print("Buscando stream de video 1080p...")
-        video_stream = yt.streams.filter(res="1080p", adaptive=True, file_extension="mp4").first()
-
-        if not video_stream:
-            print("⚠️  No se encontró una versión en 1080p para este video.")
-            print("Intentando buscar la mayor resolución disponible...")
-            video_stream = (
-                yt.streams
-                .filter(adaptive=True, file_extension="mp4")
-                .order_by("resolution")
-                .desc()
-                .first()
-            )
-            if video_stream:
-                print(f"Se descargará en: {video_stream.resolution}")
-            else:
-                print("❌ No se encontró ningún stream de video válido.")
-                return
-
-        # B. BUSCAR AUDIO (Idioma deseado, si YouTube lo ofrece)
-        print(f"Buscando stream de audio en idioma: {audio_language}...")
-        audio_stream, requested_audio_found, available_audio_streams = select_audio_stream(
-            yt.streams,
-            audio_language
-        )
-
-        if available_audio_streams:
-            print("\nPistas de audio detectadas:")
-            seen_tracks = set()
-            for stream in available_audio_streams:
-                track_description = describe_audio_track(stream)
-                if track_description not in seen_tracks:
-                    print(f"  - {track_description}")
-                    seen_tracks.add(track_description)
-
-        if audio_stream and requested_audio_found:
-            print(f"Audio seleccionado: {describe_audio_track(audio_stream)}")
-        elif audio_stream:
-            print(f"⚠️  No se encontró audio en '{audio_language}'.")
-            if download_auto_dub_with_ytdlp(url, download_path, yt.title, audio_language):
-                print("\n✨ ¡Proceso finalizado!")
-                return
-            print(f"Se usará: {describe_audio_track(audio_stream)}")
-
-        # --- 4. Descargar Archivos ---
-
-        # Descarga del VIDEO
-        print(f"\n⬇️  Descargando VIDEO ({video_stream.resolution})...")
-        video_file = video_stream.download(
-            output_path=download_path,
-            filename_prefix="VIDEO_Only_"
-        )
-        print(f"✅ Video guardado: {os.path.basename(video_file)}")
-
-        # Descarga del AUDIO
-        audio_file = None
-        if audio_stream:
-            print(f"\n⬇️  Descargando AUDIO ({describe_audio_track(audio_stream)})...")
-            audio_file = audio_stream.download(
-                output_path=download_path,
-                filename_prefix="AUDIO_Only_"
-            )
-            print(f"✅ Audio guardado: {os.path.basename(audio_file)}")
-        else:
-            print("⚠️  No se encontró stream de audio separado.")
-            print("No se puede realizar la fusión sin un track de audio.")
+        if not download_video_with_ytdlp_fallback(
+            url, download_path, audio_language, selected_options, cookie_browser
+        ):
             return
-
-        # --- 5. Fusión con ffmpeg ---
-        print("\n🎬 Fusionando VIDEO + AUDIO en un único archivo MP4...")
-
-        safe_title = sanitize_filename(yt.title)
-        output_file = os.path.join(download_path, f"{safe_title}_1080p_merged.mp4")
-        ffmpeg_path = find_executable("ffmpeg")
-        if not ffmpeg_path:
-            print("❌ No se encontró el ejecutable 'ffmpeg'.")
-            print("Incluye ffmpeg en la carpeta 'bin' junto al ejecutable o instálalo en el PATH.")
-            print("ℹ️ Los archivos de solo vídeo y audio se mantienen.")
-            return
-
-        cmd = [
-            ffmpeg_path,
-            "-y",
-            "-i", video_file,
-            "-i", audio_file,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            output_file
-        ]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            if result.returncode == 0:
-                print(f"✅ Fusión completada correctamente.")
-                print(f"📁 Archivo final: {output_file}")
-
-                # --- 6. Borrar archivos temporales (video y audio separados) ---
-                try:
-                    if os.path.exists(video_file):
-                        os.remove(video_file)
-                    if os.path.exists(audio_file):
-                        os.remove(audio_file)
-                    print("🧹 Archivos temporales (VIDEO_Only_*, AUDIO_Only_*) eliminados.")
-                except OSError as e:
-                    print(f"⚠️ No se pudieron eliminar los archivos temporales: {e}")
-
-            else:
-                print("❌ Error al fusionar con ffmpeg.")
-                print("Salida de ffmpeg (stderr):")
-                print(result.stderr)
-                print("ℹ️ Los archivos de solo vídeo y audio se mantienen para revisar el problema.")
-
-        except FileNotFoundError:
-            print("❌ No se encontró el ejecutable 'ffmpeg'.")
-            print("Asegúrate de tener ffmpeg instalado y accesible en el PATH del sistema.")
-            print("Por ejemplo, en macOS puedes instalarlo con: brew install ffmpeg")
-            print("ℹ️ Los archivos de solo vídeo y audio se mantienen.")
 
         print("\n✨ ¡Proceso finalizado!")
         print(f"Archivos en: {download_path}")
 
     except BotDetection:
         print("⚠️ pytubefix ha detectado tráfico automatizado; usando yt-dlp como respaldo...")
-        if download_video_with_ytdlp_fallback(url, download_path, audio_language):
+        if download_video_with_ytdlp_fallback(
+            url, download_path, audio_language, selected_options, cookie_browser
+        ):
             print("\n✨ ¡Proceso finalizado!")
         else:
             print("❌ No se pudo descargar el vídeo con el método de respaldo.")

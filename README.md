@@ -7,6 +7,9 @@ Script de terminal en Python para descargar videos de YouTube, seleccionar audio
 - Descarga video en 1080p cuando esta disponible.
 - Descarga audio original con `pytubefix`.
 - Usa `yt-dlp` como respaldo para pistas de doblaje automatico, por ejemplo `es-US`.
+- Usa `yt-dlp` como respaldo cuando `pytubefix` detecta tráfico automatizado.
+- Permite usar cookies opcionales de Chrome, Firefox, Safari y otros navegadores compatibles.
+- Convierte las descargas de audio independiente a MP3 con la mejor calidad disponible.
 - Fusiona video y audio con `ffmpeg`.
 - Genera PDFs de transcripcion:
   - con marcas temporales
@@ -89,14 +92,37 @@ El script pedira:
 - URL del video de YouTube.
 - Ruta de guardado, con `Downloads` como valor por defecto.
 - Idioma deseado para audio/transcripcion, con `es` como valor por defecto.
+- Navegador opcional del que se leeran cookies para los respaldos de `yt-dlp`.
+
+Para no usar cookies, deja este ultimo campo vacio. Las cookies se leen localmente y nunca se guardan en el repositorio.
+
+En el menu de descargas, escribe un numero para marcar o desmarcar una opcion. Usa `d` para continuar, `a` para marcar todas, `n` para limpiar la seleccion y `q` para cancelar. Tambien puedes escribir varios numeros, por ejemplo `1,3,6`.
+
+## Ejecutar desde cualquier directorio
+
+En macOS, el comando global `python-youtubedownloader` crea el entorno virtual si falta, comprueba sus dependencias y ejecuta la aplicacion desde cualquier carpeta:
+
+```bash
+python-youtubedownloader
+```
+
+Para comprobar la instalacion sin iniciar una descarga:
+
+```bash
+python-youtubedownloader --self-test
+```
+
+El lanzador esta en [scripts/python-youtubedownloader](scripts/python-youtubedownloader) y se instala mediante un enlace en `~/.local/bin`.
 
 ## Salidas generadas
 
 Segun disponibilidad del video, se generaran archivos como:
 
 ```text
-<titulo>_1080p_merged.mp4
-<titulo>_1080p_es_auto_dub.mp4
+<titulo>_1080p_original.mp4
+<titulo>_1080p_es.mp4
+<titulo>_audio_original.mp3
+<titulo>_audio_es.mp3
 <titulo>_transcripcion_original.pdf
 <titulo>_transcripcion_original_sin_marcas.pdf
 <titulo>_transcripcion_es.pdf
@@ -108,6 +134,7 @@ Segun disponibilidad del video, se generaran archivos como:
 - YouTube puede limitar temporalmente la descarga de subtitulos/traducciones con `HTTP Error 429: Too Many Requests`. Si ocurre, espera unos minutos y vuelve a ejecutar.
 - No todos los videos ofrecen pista doblada, subtitulos o traduccion automatica.
 - Este proyecto depende de APIs no oficiales de YouTube a traves de `pytubefix` y `yt-dlp`; puede necesitar actualizaciones cuando YouTube cambie su funcionamiento.
+- Si YouTube devuelve `HTTP 403`, la aplicacion prueba varios clientes y formatos. Si persiste, puedes probar con cookies del navegador o configurar un proveedor externo de PO Tokens compatible con `yt-dlp`.
 
 ## Publicar en GitHub
 
