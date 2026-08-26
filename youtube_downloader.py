@@ -1,5 +1,3 @@
-from pytubefix import YouTube
-from pytubefix.exceptions import BotDetection, VideoUnavailable, RegexMatchError
 import html
 import json
 import os
@@ -10,6 +8,7 @@ import sys
 import tempfile
 import re
 import urllib.request
+from urllib.parse import urlparse
 
 SPANISH_AUDIO_NAMES = {"spanish", "español", "espanol", "castellano", "latino"}
 SUPPORTED_COOKIE_BROWSERS = {
@@ -159,10 +158,8 @@ def run_self_test() -> int:
 
     try:
         import certifi
-        import pytubefix
         import yt_dlp
         print(f"certifi: {certifi.where()}")
-        print(f"pytubefix: {getattr(pytubefix, '__version__', 'installed')}")
         print(f"yt-dlp: {yt_dlp.version.__version__}")
     except Exception as e:
         print(f"Dependency import failed: {e}")
@@ -512,7 +509,7 @@ def download_auto_dub_with_ytdlp(
     language_code: str,
     browser: str | None = None,
 ) -> bool:
-    """Descarga pistas de doblaje automático que no aparecen en pytubefix."""
+    """Descarga una pista de doblaje automático de YouTube."""
     node_path = find_executable("node")
     if not node_path:
         print("⚠️  No se encontró Node.js, necesario para resolver algunas pistas de YouTube con yt-dlp.")
@@ -617,11 +614,14 @@ def download_video_with_ytdlp_fallback(
             })
         return options
 
-    profiles = [
-        ("predeterminado", None),
-        ("web_embedded", "web_embedded"),
-        ("android_vr", "android_vr"),
-    ]
+    host = urlparse(url).netloc.lower()
+    is_youtube_url = host == "youtu.be" or host.endswith(("youtube.com", "youtube-nocookie.com"))
+    profiles = [("predeterminado", None)]
+    if is_youtube_url:
+        profiles.extend([
+            ("web_embedded", "web_embedded"),
+            ("android_vr", "android_vr"),
+        ])
     info = None
     successful_profile = None
     extraction_errors = []
@@ -638,16 +638,19 @@ def download_video_with_ytdlp_fallback(
         print("❌ yt-dlp tampoco pudo acceder al vídeo.")
         for error in extraction_errors:
             print(f"   - {error}")
+        report_access_problem("\n".join(extraction_errors))
         return False
 
     title = info.get("title") or "video_descargado"
     safe_title = sanitize_filename(title)
     print(f"Título obtenido con yt-dlp: **{title}**")
 
-    try:
-        generate_transcription_pdfs(url, download_path, title, language_code, selected_options)
-    except Exception as error:
-        print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
+    is_youtube = str(info.get("extractor_key", "")).lower().startswith("youtube")
+    if is_youtube:
+        try:
+            generate_transcription_pdfs(url, download_path, title, language_code, selected_options)
+        except Exception as error:
+            print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
 
     jobs = []
     if 3 in selected_options:
@@ -691,7 +694,9 @@ def download_video_with_ytdlp_fallback(
         print("✅ Solo se solicitaron transcripciones.")
         return True
 
-    download_profiles = [successful_profile] + [profile for profile in profiles if profile != successful_profile]
+    download_profiles = [successful_profile] + [
+        profile for profile in profiles if profile != successful_profile
+    ]
     failed_jobs = []
     for job_name, format_selector, filename, postprocessors in jobs:
         completed = False
@@ -713,29 +718,167 @@ def download_video_with_ytdlp_fallback(
                 message = str(error).splitlines()[-1]
                 print(f"⚠️ Falló {job_name} con {profile_name}: {message}")
                 if "403" in message:
-                    print("   YouTube rechazó el formato; probando otro cliente...")
+                    print("   El servidor rechazó el formato; comprueba cookies y permisos de acceso.")
         if not completed:
             failed_jobs.append(job_name)
 
     if failed_jobs:
         print(f"❌ No se pudieron descargar: {', '.join(failed_jobs)}")
-        print("ℹ️ Si persiste HTTP 403, prueba cookies del navegador o un proveedor de PO Tokens.")
+        print("ℹ️ Si persiste HTTP 403, prueba cookies del navegador o verifica los permisos del vídeo.")
         return False
 
     print(f"✅ Descargas completadas en: {download_path}")
     return True
 
-def download_youtube_video_separated():
+
+DIRECT_MEDIA_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".mp3", ".m4a", ".aac", ".wav"}
+STREAM_CONTENT_TYPES = {"application/vnd.apple.mpegurl", "application/x-mpegurl", "application/dash+xml"}
+
+
+def probe_url(url: str) -> tuple[str, str]:
+    """Devuelve (content-type, url-final) sin descargar el contenido completo."""
+    headers = {"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"}
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.headers.get_content_type().lower(), response.geturl()
+    except Exception:
+        return "", url
+
+
+def media_kind(url: str, content_type: str) -> str | None:
+    path = urlparse(url).path.lower()
+    if path.endswith((".m3u8", ".m3u")) or content_type in STREAM_CONTENT_TYPES:
+        return "stream"
+    if path.endswith(".mpd"):
+        return "stream"
+    if path.endswith(tuple(DIRECT_MEDIA_EXTENSIONS)) or content_type.startswith(("video/", "audio/")):
+        return "direct"
+    return None
+
+
+def run_ffmpeg_input(input_url: str, output_file: str) -> bool:
+    ffmpeg_path = find_executable("ffmpeg")
+    if not ffmpeg_path:
+        print("❌ No se encontró ffmpeg para procesar el stream.")
+        return False
+    result = subprocess.run(
+        [ffmpeg_path, "-y", "-i", input_url, "-c", "copy", output_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"✅ Archivo guardado en: {output_file}")
+        return True
+    report_access_problem(result.stdout or "")
+    return False
+
+
+def download_direct_media(url: str, download_path: str, title: str = "video_descargado") -> bool:
+    content_type, final_url = probe_url(url)
+    kind = media_kind(final_url, content_type)
+    if not kind:
+        return False
+
+    safe_title = sanitize_filename(title)
+    if kind == "stream":
+        output_file = os.path.join(download_path, f"{safe_title}.mp4")
+        return run_ffmpeg_input(final_url, output_file)
+
+    extension = os.path.splitext(urlparse(final_url).path)[1].lower() or ".mp4"
+    output_file = os.path.join(download_path, f"{safe_title}{extension}")
+    try:
+        request = urllib.request.Request(final_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=60) as response, open(output_file, "wb") as target:
+            shutil.copyfileobj(response, target, length=1024 * 1024)
+        print(f"✅ Archivo guardado en: {output_file}")
+        return True
+    except Exception as error:
+        print(f"⚠️ No se pudo descargar el archivo directo: {error}")
+        report_access_problem(str(error))
+        return False
+
+
+def discover_media_url_with_playwright(url: str) -> str | None:
+    """Busca una URL HLS/DASH o de vídeo generada por JavaScript."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("ℹ️ Playwright no está instalado; se omite el fallback de navegador.")
+        return None
+
+    candidates = []
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            def inspect_response(response):
+                content_type = response.headers.get("content-type", "").lower()
+                response_url = response.url.lower()
+                if (
+                    ".m3u8" in response_url
+                    or ".mpd" in response_url
+                    or content_type in STREAM_CONTENT_TYPES
+                    or content_type.startswith("video/")
+                ):
+                    candidates.append(response.url)
+
+            page.on("response", inspect_response)
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(5_000)
+            browser.close()
+    except Exception as error:
+        print(f"⚠️ El navegador no pudo analizar la página: {error}")
+        return None
+    return candidates[0] if candidates else None
+
+
+def report_access_problem(message: str) -> None:
+    lowered = message.lower()
+    if any(term in lowered for term in ("drm", "widevine", "fairplay", "playready", "encrypted")):
+        print("⛔ El contenido parece estar protegido con DRM; no se puede descargar con este flujo.")
+    elif any(term in lowered for term in ("401", "403", "forbidden", "unauthorized", "login", "sign in", "password")):
+        print("🔒 El contenido requiere autenticación, contraseña o permisos de descarga.")
+
+
+def download_from_url(
+    url: str,
+    download_path: str,
+    language_code: str,
+    selected_options: set[int],
+    browser: str | None = None,
+) -> bool:
+    """Prueba los extractores y respaldos en orden, sin asumir que la URL es de YouTube."""
+    print("\nProbando yt-dlp...")
+    if download_video_with_ytdlp_fallback(url, download_path, language_code, selected_options, browser):
+        return True
+
+    print("\nyt-dlp no encontró un extractor funcional; comprobando archivo o stream directo...")
+    if download_direct_media(url, download_path):
+        return True
+
+    print("\nBuscando un reproductor generado por JavaScript con Playwright...")
+    discovered_url = discover_media_url_with_playwright(url)
+    if discovered_url and download_direct_media(discovered_url, download_path):
+        return True
+
+    print("❌ No se pudo localizar un vídeo descargable en la URL proporcionada.")
+    print("ℹ️ Puede ser una página no compatible, requerir autenticación o usar DRM.")
+    return False
+
+def download_video_separated():
     """
     Solicita las salidas elegidas y las descarga con yt-dlp, fusionando
     vídeo y audio cuando corresponde.
     """
 
-    print("--- Descargador Separado (1080p Video + Audio) ---")
+    print("--- Descargador de vídeo desde URL ---")
 
     # --- 1. Entrada de la URL ---
     while True:
-        url = input("Por favor, introduce la URL del video de YouTube: ").strip()
+        url = input("Por favor, introduce la URL del vídeo: ").strip()
         if url:
             break
         print("La URL no puede estar vacía.")
@@ -767,29 +910,12 @@ def download_youtube_video_separated():
 
     # --- 3. Proceso de Descarga ---
     try:
-        print("\nConectando con YouTube...")
-        yt = YouTube(url)
-        print(f"Título: **{yt.title}**")
-        if not download_video_with_ytdlp_fallback(
-            url, download_path, audio_language, selected_options, cookie_browser
-        ):
-            return
-
-        print("\n✨ ¡Proceso finalizado!")
-        print(f"Archivos en: {download_path}")
-
-    except BotDetection:
-        print("⚠️ pytubefix ha detectado tráfico automatizado; usando yt-dlp como respaldo...")
-        if download_video_with_ytdlp_fallback(
+        if download_from_url(
             url, download_path, audio_language, selected_options, cookie_browser
         ):
             print("\n✨ ¡Proceso finalizado!")
         else:
-            print("❌ No se pudo descargar el vídeo con el método de respaldo.")
-    except VideoUnavailable:
-        print("❌ Error: Video no disponible.")
-    except RegexMatchError:
-        print("❌ Error: URL inválida.")
+            return
     except Exception as e:
         print(f"❌ Error inesperado: {e}")
 
@@ -797,4 +923,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         raise SystemExit(run_self_test())
     setup_portable_environment()
-    download_youtube_video_separated()
+    download_video_separated()

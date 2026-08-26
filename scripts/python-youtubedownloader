@@ -15,7 +15,7 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 
-if ! "$VENV_DIR/bin/python" -c 'import certifi, curl_cffi, pytubefix, yt_dlp, yt_dlp_ejs' 2>/dev/null; then
+if ! "$VENV_DIR/bin/python" -c 'import certifi, curl_cffi, yt_dlp, yt_dlp_ejs' 2>/dev/null; then
   print "Instalando dependencias del proyecto..."
   "$VENV_DIR/bin/python" -m pip install -q -r "$PROJECT_DIR/requirements.txt"
 fi

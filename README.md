@@ -1,13 +1,15 @@
-# YouTube Downloader
+# Video Downloader
 
-Script de terminal en Python para descargar videos de YouTube, seleccionar audio original o doblaje automatico cuando este disponible, fusionar video/audio con `ffmpeg` y generar PDFs de transcripcion.
+Script de terminal en Python para descargar vídeos desde una URL. Prueba `yt-dlp`, archivos directos, streams HLS/DASH y, opcionalmente, páginas dinámicas mediante Playwright.
 
 ## Funcionalidades
 
 - Descarga video en 1080p cuando esta disponible.
-- Descarga audio original con `pytubefix`.
-- Usa `yt-dlp` como respaldo para pistas de doblaje automatico, por ejemplo `es-US`.
-- Usa `yt-dlp` como respaldo cuando `pytubefix` detecta tráfico automatizado.
+- Intenta primero `yt-dlp`, que permite trabajar con muchas plataformas además de YouTube.
+- Descarga archivos directos (`.mp4`, `.webm`, `.mov`, etc.) mediante HTTP.
+- Procesa streams HLS (`.m3u8`) y DASH (`.mpd`) con `ffmpeg`.
+- Puede inspeccionar páginas que generan el reproductor con JavaScript usando Playwright.
+- En YouTube, puede buscar pistas de doblaje automático, por ejemplo `es-US`.
 - Permite usar cookies opcionales de Chrome, Firefox, Safari y otros navegadores compatibles.
 - Convierte las descargas de audio independiente a MP3 con la mejor calidad disponible.
 - Fusiona video y audio con `ffmpeg`.
@@ -20,6 +22,13 @@ Script de terminal en Python para descargar videos de YouTube, seleccionar audio
 - Python 3.12 recomendado.
 - `ffmpeg` instalado y disponible en el `PATH`.
 - Node.js instalado y disponible en el `PATH` para resolver algunos formatos de YouTube usados por `yt-dlp`.
+
+Playwright es opcional. Para activarlo:
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+```
 
 En macOS con Homebrew:
 
@@ -89,10 +98,12 @@ python youtube_downloader.py
 
 El script pedira:
 
-- URL del video de YouTube.
+- URL del vídeo o de la página que lo contiene.
 - Ruta de guardado, con `Downloads` como valor por defecto.
 - Idioma deseado para audio/transcripcion, con `es` como valor por defecto.
 - Navegador opcional del que se leeran cookies para los respaldos de `yt-dlp`.
+
+Si el contenido requiere inicio de sesión, contraseña o permisos especiales, introduce el navegador que contiene la sesión para que `yt-dlp` intente leer sus cookies. El programa informa cuando detecta respuestas de autenticación, acceso denegado o DRM.
 
 Para no usar cookies, deja este ultimo campo vacio. Las cookies se leen localmente y nunca se guardan en el repositorio.
 
@@ -133,7 +144,7 @@ Segun disponibilidad del video, se generaran archivos como:
 
 - YouTube puede limitar temporalmente la descarga de subtitulos/traducciones con `HTTP Error 429: Too Many Requests`. Si ocurre, espera unos minutos y vuelve a ejecutar.
 - No todos los videos ofrecen pista doblada, subtitulos o traduccion automatica.
-- Este proyecto depende de APIs no oficiales de YouTube a traves de `pytubefix` y `yt-dlp`; puede necesitar actualizaciones cuando YouTube cambie su funcionamiento.
+- Este proyecto depende de extractores de `yt-dlp`; puede necesitar actualizaciones cuando las plataformas cambien su funcionamiento.
 - Si YouTube devuelve `HTTP 403`, la aplicacion prueba varios clientes y formatos. Si persiste, puedes probar con cookies del navegador o configurar un proveedor externo de PO Tokens compatible con `yt-dlp`.
 
 ## Publicar en GitHub
