@@ -269,25 +269,109 @@ def format_timestamp(milliseconds: int) -> str:
     seconds = total_seconds % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-def extract_caption_entries(caption_json: dict) -> list[tuple[int, str]]:
+def extract_caption_entries(
+    caption_json: dict,
+    start_ms: int = 0,
+    end_ms: int | None = None,
+) -> list[tuple[int, str]]:
     entries = []
     previous_text = None
     for event in caption_json.get("events", []):
+        start_ms_for_event = int(event.get("tStartMs", 0))
+        if start_ms_for_event < start_ms or (end_ms is not None and start_ms_for_event >= end_ms):
+            continue
         segments = event.get("segs") or []
         text = "".join(segment.get("utf8", "") for segment in segments)
         text = html.unescape(re.sub(r"\s+", " ", text)).strip()
         if not text or text == previous_text:
             continue
-        entries.append((int(event.get("tStartMs", 0)), text))
+        entries.append((start_ms_for_event, text))
         previous_text = text
     return entries
 
-def captions_to_lines(caption_json: dict, heading: str) -> list[str]:
+def captions_to_lines(
+    caption_json: dict,
+    heading: str,
+    start_ms: int = 0,
+    end_ms: int | None = None,
+) -> list[str]:
     lines = [heading, ""]
-    for start_ms, text in extract_caption_entries(caption_json):
-        timestamp = format_timestamp(start_ms)
+    for entry_start_ms, text in extract_caption_entries(caption_json, start_ms, end_ms):
+        timestamp = format_timestamp(entry_start_ms)
         lines.append(f"[{timestamp}] {text}")
     return lines
+
+
+def format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def interval_format_for_duration(duration: float) -> str:
+    if duration < 60:
+        return "ss-ss"
+    if duration < 3600:
+        return "mm:ss-mm:ss"
+    return "HH:mm:ss-HH:mm:ss"
+
+
+def parse_time_value(value: str, duration: float) -> int:
+    parts = value.split(":")
+    expected_parts = 1 if duration < 60 else 2 if duration < 3600 else 3
+    if len(parts) != expected_parts or any(not part.isdigit() for part in parts):
+        raise ValueError(f"usa el formato {interval_format_for_duration(duration)}")
+
+    numbers = [int(part) for part in parts]
+    if expected_parts >= 2 and not 0 <= numbers[-1] < 60:
+        raise ValueError("los segundos deben estar entre 00 y 59")
+    if expected_parts == 3 and not 0 <= numbers[-2] < 60:
+        raise ValueError("los minutos deben estar entre 00 y 59")
+
+    if expected_parts == 1:
+        return numbers[0]
+    if expected_parts == 2:
+        return numbers[0] * 60 + numbers[1]
+    return numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
+
+
+def parse_time_interval(interval: str, duration: float) -> tuple[int, int]:
+    values = interval.strip().split("-")
+    if len(values) != 2:
+        raise ValueError(f"usa el formato {interval_format_for_duration(duration)}")
+
+    start = parse_time_value(values[0].strip(), duration)
+    end = parse_time_value(values[1].strip(), duration)
+    if start >= end:
+        raise ValueError("el inicio debe ser menor que el final")
+    if end > duration:
+        raise ValueError(f"el intervalo supera la duración real ({format_duration(duration)})")
+    return start, end
+
+
+def prompt_time_interval(url: str, browser: str | None = None) -> tuple[int, int] | None:
+    while True:
+        answer = input("¿Quieres extraer un fragmento concreto? [s/N]: ").strip().lower()
+        if answer in ("", "n", "no"):
+            return None
+        if answer in ("s", "si", "sí", "y", "yes"):
+            duration = get_ytdlp_duration(url, browser)
+            if duration is None:
+                print("⚠️ No se pudo obtener la duración; se usará el vídeo completo.")
+                return None
+
+            print(f"Duración real del vídeo: {format_duration(duration)}")
+            expected_format = interval_format_for_duration(duration)
+            while True:
+                interval = input(f"Intervalo ({expected_format}): ").strip()
+                try:
+                    return parse_time_interval(interval, duration)
+                except ValueError as error:
+                    print(f"⚠️ Intervalo no válido: {error}")
+                    print("Introduce nuevamente el intervalo.")
+        else:
+            print("Responde s o n.")
 
 def caption_entries_to_clean_lines(entries: list[tuple[int, str]], heading: str) -> list[str]:
     lines = [heading, ""]
@@ -305,6 +389,26 @@ def caption_entries_to_clean_lines(entries: list[tuple[int, str]], heading: str)
         lines.extend(wrap_text(" ".join(paragraph_parts).strip(), max_chars=92))
 
     return lines
+
+
+def get_ytdlp_duration(url: str, browser: str | None = None) -> float | None:
+    """Obtiene la duración antes de pedir y validar un intervalo."""
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        return None
+
+    options = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    if browser:
+        options["cookiesfrombrowser"] = (browser, None, None, None)
+    try:
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+        duration = info.get("duration")
+        return float(duration) if duration is not None else None
+    except Exception as error:
+        print(f"⚠️ No se pudo obtener la duración del vídeo: {error}")
+        return None
 
 def find_caption_track(captions: dict, preferred_codes: list[str]):
     for code in preferred_codes:
@@ -372,7 +476,13 @@ def generate_transcription_pdfs(
     title: str,
     language_code: str,
     selected_options: set[int] | None = None,
+    time_range: tuple[int, int] | None = None,
 ) -> None:
+    selected_options = selected_options or set()
+    transcript_options = selected_options.intersection({1, 2})
+    if not transcript_options:
+        return
+
     try:
         from yt_dlp import YoutubeDL
     except ImportError:
@@ -400,13 +510,12 @@ def generate_transcription_pdfs(
         print("⚠️  YouTube no devolvió subtítulos automáticos para generar PDF.")
         return
 
-    selected_options = selected_options or {1, 2}
     transcript_requests = []
-    if 1 in selected_options:
+    if 1 in transcript_options:
         transcript_requests.append(
             ("original", "Transcripción del audio original", ["en-orig", "en-US", "en"])
         )
-    if 2 in selected_options:
+    if 2 in transcript_options:
         transcript_requests.append(
             (language_code, f"Transcripción/traducción en {language_code}", [language_code, f"{language_code}-US", "es", "es-US"])
         )
@@ -433,8 +542,16 @@ def generate_transcription_pdfs(
                 print(f"⚠️  No se pudo descargar la transcripción {code}: {first_error}; respaldo: {second_error}")
                 continue
 
-        caption_entries = extract_caption_entries(caption_json)
-        lines = captions_to_lines(caption_json, f"{heading} ({code})")
+        range_start_ms, range_end_ms = (0, None)
+        if time_range:
+            range_start_ms, range_end_ms = (time_range[0] * 1000, time_range[1] * 1000)
+        caption_entries = extract_caption_entries(caption_json, range_start_ms, range_end_ms)
+        lines = captions_to_lines(
+            caption_json,
+            f"{heading} ({code})",
+            range_start_ms,
+            range_end_ms,
+        )
         clean_lines = caption_entries_to_clean_lines(
             caption_entries,
             f"{heading} sin marcas temporales ({code})"
@@ -568,6 +685,7 @@ def download_video_with_ytdlp_fallback(
     language_code: str,
     selected_options: set[int] | None = None,
     browser: str | None = None,
+    time_range: tuple[int, int] | None = None,
 ) -> bool:
     """Descarga las opciones elegidas con varios perfiles de yt-dlp."""
     try:
@@ -591,6 +709,14 @@ def download_video_with_ytdlp_fallback(
             "no_warnings": True,
             "noplaylist": True,
         }
+        if time_range:
+            options.update({
+                "download_ranges": lambda _info, _ydl: [{
+                    "start_time": time_range[0],
+                    "end_time": time_range[1],
+                }],
+                "force_keyframes_at_cuts": True,
+            })
         if format_selector:
             options.update({
                 "format": format_selector,
@@ -646,9 +772,16 @@ def download_video_with_ytdlp_fallback(
     print(f"Título obtenido con yt-dlp: **{title}**")
 
     is_youtube = str(info.get("extractor_key", "")).lower().startswith("youtube")
-    if is_youtube:
+    if is_youtube and selected_options.intersection({1, 2}):
         try:
-            generate_transcription_pdfs(url, download_path, title, language_code, selected_options)
+            generate_transcription_pdfs(
+                url,
+                download_path,
+                title,
+                language_code,
+                selected_options,
+                time_range,
+            )
         except Exception as error:
             print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
 
@@ -757,13 +890,24 @@ def media_kind(url: str, content_type: str) -> str | None:
     return None
 
 
-def run_ffmpeg_input(input_url: str, output_file: str) -> bool:
+def run_ffmpeg_input(
+    input_url: str,
+    output_file: str,
+    time_range: tuple[int, int] | None = None,
+) -> bool:
     ffmpeg_path = find_executable("ffmpeg")
     if not ffmpeg_path:
         print("❌ No se encontró ffmpeg para procesar el stream.")
         return False
+    command = [ffmpeg_path, "-y"]
+    if time_range:
+        start, end = time_range
+        command.extend(["-ss", str(start), "-i", input_url, "-t", str(end - start)])
+    else:
+        command.extend(["-i", input_url])
+    command.extend(["-c", "copy", output_file])
     result = subprocess.run(
-        [ffmpeg_path, "-y", "-i", input_url, "-c", "copy", output_file],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -775,7 +919,12 @@ def run_ffmpeg_input(input_url: str, output_file: str) -> bool:
     return False
 
 
-def download_direct_media(url: str, download_path: str, title: str = "video_descargado") -> bool:
+def download_direct_media(
+    url: str,
+    download_path: str,
+    title: str = "video_descargado",
+    time_range: tuple[int, int] | None = None,
+) -> bool:
     content_type, final_url = probe_url(url)
     kind = media_kind(final_url, content_type)
     if not kind:
@@ -784,10 +933,12 @@ def download_direct_media(url: str, download_path: str, title: str = "video_desc
     safe_title = sanitize_filename(title)
     if kind == "stream":
         output_file = os.path.join(download_path, f"{safe_title}.mp4")
-        return run_ffmpeg_input(final_url, output_file)
+        return run_ffmpeg_input(final_url, output_file, time_range)
 
     extension = os.path.splitext(urlparse(final_url).path)[1].lower() or ".mp4"
     output_file = os.path.join(download_path, f"{safe_title}{extension}")
+    if time_range:
+        return run_ffmpeg_input(final_url, output_file, time_range)
     try:
         request = urllib.request.Request(final_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request, timeout=60) as response, open(output_file, "wb") as target:
@@ -849,19 +1000,27 @@ def download_from_url(
     language_code: str,
     selected_options: set[int],
     browser: str | None = None,
+    time_range: tuple[int, int] | None = None,
 ) -> bool:
     """Prueba los extractores y respaldos en orden, sin asumir que la URL es de YouTube."""
     print("\nProbando yt-dlp...")
-    if download_video_with_ytdlp_fallback(url, download_path, language_code, selected_options, browser):
+    if download_video_with_ytdlp_fallback(
+        url,
+        download_path,
+        language_code,
+        selected_options,
+        browser,
+        time_range,
+    ):
         return True
 
     print("\nyt-dlp no encontró un extractor funcional; comprobando archivo o stream directo...")
-    if download_direct_media(url, download_path):
+    if download_direct_media(url, download_path, time_range=time_range):
         return True
 
     print("\nBuscando un reproductor generado por JavaScript con Playwright...")
     discovered_url = discover_media_url_with_playwright(url)
-    if discovered_url and download_direct_media(discovered_url, download_path):
+    if discovered_url and download_direct_media(discovered_url, download_path, time_range=time_range):
         return True
 
     print("❌ No se pudo localizar un vídeo descargable en la URL proporcionada.")
@@ -882,6 +1041,8 @@ def download_video_separated():
         if url:
             break
         print("La URL no puede estar vacía.")
+
+    time_range = prompt_time_interval(url)
 
     # --- 2. Ruta de Guardado ---
     default_path = os.path.join(os.path.expanduser('~'), 'Downloads')
@@ -911,7 +1072,12 @@ def download_video_separated():
     # --- 3. Proceso de Descarga ---
     try:
         if download_from_url(
-            url, download_path, audio_language, selected_options, cookie_browser
+            url,
+            download_path,
+            audio_language,
+            selected_options,
+            cookie_browser,
+            time_range,
         ):
             print("\n✨ ¡Proceso finalizado!")
         else:
