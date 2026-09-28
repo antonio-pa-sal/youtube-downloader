@@ -9,7 +9,7 @@ import sys
 import tempfile
 import re
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunsplit
 
 SPANISH_AUDIO_NAMES = {"spanish", "español", "espanol", "castellano", "latino"}
 SUPPORTED_COOKIE_BROWSERS = {
@@ -98,6 +98,27 @@ def select_download_options() -> set[int] | None:
                     selected.add(number)
             continue
         print("Selección no válida. Usa números del 1 al 6.")
+
+
+def select_transcription_format() -> str:
+    """Permite elegir el formato de los archivos de transcripción."""
+    print("\nFormato de la transcripción:")
+    print("  [p] PDF   [m] Markdown (.md)   [a] Ambos   [Intro] PDF")
+    choices = {
+        "": "pdf",
+        "p": "pdf",
+        "pdf": "pdf",
+        "m": "markdown",
+        "md": "markdown",
+        "markdown": "markdown",
+        "a": "both",
+        "ambos": "both",
+    }
+    while True:
+        answer = input("Formato: ").strip().lower()
+        if answer in choices:
+            return choices[answer]
+        print("Selección no válida. Escribe p, m, a o Intro.")
 
 def setup_portable_environment() -> None:
     bin_dir = bundled_bin_dir()
@@ -302,6 +323,115 @@ def captions_to_lines(
         timestamp = format_timestamp(entry_start_ms)
         lines.append(f"[{timestamp}] {text}")
     return lines
+
+
+def markdown_escape_transcript_text(text: str) -> str:
+    """Evita que el texto reconocido se interprete como sintaxis Markdown."""
+    text = text.replace("\\", "\\\\")
+    return re.sub(r"([`*_\[\]])", r"\\\1", text)
+
+
+def build_markdown_transcript(
+    title: str,
+    heading: str,
+    source_url: str,
+    language: str | None,
+    entries: list[tuple[int, str]],
+    transcript_source: str,
+    time_range: tuple[int, int] | None = None,
+) -> str:
+    """Devuelve una transcripción Markdown con metadatos y párrafos temporizados."""
+    safe_url = urlunsplit((*urlparse(source_url)[:3], "", ""))
+    language_label = language or "No especificado"
+    lines = [
+        f"# {markdown_escape_transcript_text(title)} — {markdown_escape_transcript_text(heading)}",
+        "",
+        f"- **Idioma:** {language_label}",
+        f"- **Origen de la transcripción:** {transcript_source}",
+        f"- **Vídeo:** <{safe_url}>",
+    ]
+    if time_range:
+        lines.append(
+            f"- **Fragmento:** {format_duration(time_range[0])}–{format_duration(time_range[1])}"
+        )
+    lines.extend(["", "## Transcripción", ""])
+
+    paragraph_parts = []
+    paragraph_start_ms = None
+    for start_ms, text in entries:
+        clean_text = re.sub(r"\s+", " ", text).strip()
+        if not clean_text:
+            continue
+        if paragraph_start_ms is None:
+            paragraph_start_ms = start_ms
+        paragraph_parts.append(clean_text)
+        paragraph_text = " ".join(paragraph_parts).strip()
+        if re.search(r'[.!?;:。！？]["”’)]?$', paragraph_text):
+            lines.append(
+                f"**[{format_timestamp(paragraph_start_ms)}]** "
+                f"{markdown_escape_transcript_text(paragraph_text)}"
+            )
+            lines.append("")
+            paragraph_parts = []
+            paragraph_start_ms = None
+    if paragraph_parts:
+        paragraph_text = " ".join(paragraph_parts).strip()
+        lines.append(
+            f"**[{format_timestamp(paragraph_start_ms or 0)}]** "
+            f"{markdown_escape_transcript_text(paragraph_text)}"
+        )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_transcription_outputs(
+    download_path: str,
+    title: str,
+    suffix: str,
+    heading: str,
+    source_url: str,
+    language: str | None,
+    entries: list[tuple[int, str]],
+    transcript_source: str,
+    transcript_format: str = "pdf",
+    time_range: tuple[int, int] | None = None,
+) -> list[str]:
+    """Escribe los formatos seleccionados y devuelve las rutas creadas."""
+    safe_title = sanitize_filename(title)
+    created_files = []
+    if transcript_format in {"pdf", "both"}:
+        timestamped_lines = [heading, ""]
+        timestamped_lines.extend(
+            f"[{format_timestamp(start_ms)}] {text}" for start_ms, text in entries
+        )
+        clean_lines = caption_entries_to_clean_lines(
+            entries,
+            f"{heading} sin marcas temporales",
+        )
+        output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}.pdf")
+        write_simple_pdf(output_file, f"{title} - {heading}", timestamped_lines)
+        created_files.append(output_file)
+        clean_output_file = os.path.join(
+            download_path,
+            f"{safe_title}_transcripcion_{suffix}_sin_marcas.pdf",
+        )
+        write_simple_pdf(clean_output_file, f"{title} - {heading} sin marcas temporales", clean_lines)
+        created_files.append(clean_output_file)
+    if transcript_format in {"markdown", "both"}:
+        markdown_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}.md")
+        markdown_content = build_markdown_transcript(
+            title,
+            heading,
+            source_url,
+            language,
+            entries,
+            transcript_source,
+            time_range,
+        )
+        with open(markdown_file, "w", encoding="utf-8", newline="\n") as transcript_file:
+            transcript_file.write(markdown_content)
+        created_files.append(markdown_file)
+    return created_files
 
 
 def format_duration(seconds: float) -> str:
@@ -527,6 +657,7 @@ def generate_transcription_pdfs(
     language_code: str,
     selected_options: set[int] | None = None,
     time_range: tuple[int, int] | None = None,
+    transcript_format: str = "pdf",
 ) -> set[int]:
     selected_options = selected_options or set()
     transcript_options = selected_options.intersection({1, 2})
@@ -536,11 +667,10 @@ def generate_transcription_pdfs(
     try:
         from yt_dlp import YoutubeDL
     except ImportError:
-        print("⚠️  yt-dlp no está instalado; no se generarán transcripciones PDF.")
+        print("⚠️  yt-dlp no está instalado; no se generarán transcripciones.")
         return set()
 
-    print("\nGenerando transcripciones PDF desde los subtítulos disponibles...")
-    safe_title = sanitize_filename(title)
+    print("\nGenerando transcripciones desde los subtítulos disponibles...")
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
@@ -601,31 +731,27 @@ def generate_transcription_pdfs(
         if time_range:
             range_start_ms, range_end_ms = (time_range[0] * 1000, time_range[1] * 1000)
         caption_entries = extract_caption_entries(caption_json, range_start_ms, range_end_ms)
-        lines = captions_to_lines(
-            caption_json,
-            f"{heading} ({code})",
-            range_start_ms,
-            range_end_ms,
-        )
-        clean_lines = caption_entries_to_clean_lines(
-            caption_entries,
-            f"{heading} sin marcas temporales ({code})"
-        )
-        if len(lines) <= 2:
+        if not caption_entries:
             print(f"⚠️  La transcripción {code} está vacía.")
             continue
 
-        output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}.pdf")
-        write_simple_pdf(output_file, f"{title} - {heading}", lines)
-        created_files.append(output_file)
-
-        clean_output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}_sin_marcas.pdf")
-        write_simple_pdf(clean_output_file, f"{title} - {heading} sin marcas temporales", clean_lines)
-        created_files.append(clean_output_file)
+        caption_heading = f"{heading} ({code})"
+        created_files.extend(write_transcription_outputs(
+            download_path,
+            title,
+            suffix,
+            caption_heading,
+            url,
+            code,
+            caption_entries,
+            f"Subtítulos descargados ({track.get('ext', 'texto')})",
+            transcript_format,
+            time_range,
+        ))
         created_options.add(1 if suffix == "original" else 2)
 
     for file_path in created_files:
-        print(f"✅ PDF generado: {file_path}")
+        print(f"✅ Transcripción generada: {file_path}")
     return created_options
 
 
@@ -638,8 +764,9 @@ def generate_whisper_transcription_pdfs(
     browser: str | None = None,
     client: str | None = None,
     time_range: tuple[int, int] | None = None,
+    transcript_format: str = "pdf",
 ) -> set[int]:
-    """Genera PDFs con Whisper MLX cuando yt-dlp no ofrece la transcripción."""
+    """Genera transcripciones con Whisper MLX cuando yt-dlp no ofrece subtítulos."""
     transcript_options = selected_options.intersection({1, 2})
     if not transcript_options:
         return set()
@@ -730,25 +857,21 @@ def generate_whisper_transcription_pdfs(
                     print(f"⚠️ Whisper MLX no detectó voz para: {heading}.")
                     continue
 
-                transcript_lines = [heading, ""]
-                transcript_lines.extend(
-                    f"[{format_timestamp(start_ms)}] {text}"
-                    for start_ms, text in segments
-                )
-                clean_lines = caption_entries_to_clean_lines(segments, f"{heading} sin marcas temporales")
-                output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}.pdf")
-                clean_output_file = os.path.join(
+                detected_language = result.get("language") or "Detectado automáticamente"
+                created_files = write_transcription_outputs(
                     download_path,
-                    f"{safe_title}_transcripcion_{suffix}_sin_marcas.pdf",
+                    title,
+                    suffix,
+                    heading,
+                    url,
+                    detected_language,
+                    segments,
+                    "Whisper MLX (modelo small)",
+                    transcript_format,
+                    time_range,
                 )
-                write_simple_pdf(output_file, f"{title} - {heading} (Whisper MLX)", transcript_lines)
-                write_simple_pdf(
-                    clean_output_file,
-                    f"{title} - {heading} sin marcas temporales (Whisper MLX)",
-                    clean_lines,
-                )
-                print(f"✅ PDF generado con Whisper MLX: {output_file}")
-                print(f"✅ PDF generado con Whisper MLX: {clean_output_file}")
+                for output_file in created_files:
+                    print(f"✅ Transcripción generada: {output_file}")
                 created_options.add(option)
             return created_options
     except Exception as error:
@@ -870,6 +993,7 @@ def download_video_with_ytdlp_fallback(
     selected_options: set[int] | None = None,
     browser: str | None = None,
     time_range: tuple[int, int] | None = None,
+    transcript_format: str = "pdf",
 ) -> bool:
     """Descarga las opciones elegidas con varios perfiles de yt-dlp."""
     try:
@@ -966,9 +1090,10 @@ def download_video_with_ytdlp_fallback(
                 language_code,
                 selected_options,
                 time_range,
+                transcript_format,
             )
         except Exception as error:
-            print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
+            print(f"⚠️ No se pudieron generar transcripciones: {error}")
 
     missing_transcripts = transcript_options - completed_transcripts
     if missing_transcripts:
@@ -981,6 +1106,7 @@ def download_video_with_ytdlp_fallback(
             browser,
             successful_profile[1],
             time_range,
+            transcript_format,
         )
 
     jobs = []
@@ -1227,6 +1353,7 @@ def download_from_url(
     selected_options: set[int],
     browser: str | None = None,
     time_range: tuple[int, int] | None = None,
+    transcript_format: str = "pdf",
 ) -> bool:
     """Prueba los extractores y respaldos en orden, sin asumir que la URL es de YouTube."""
     print("\nProbando yt-dlp...")
@@ -1237,6 +1364,7 @@ def download_from_url(
         selected_options,
         browser,
         time_range,
+        transcript_format,
     ):
         return True
 
@@ -1250,6 +1378,7 @@ def download_from_url(
             selected_options,
             browser,
             time_range,
+            transcript_format,
         ):
             return True
 
@@ -1300,6 +1429,9 @@ def download_video_separated():
     if selected_options is None:
         print("Operación cancelada.")
         return
+    transcript_format = "pdf"
+    if selected_options.intersection({1, 2}):
+        transcript_format = select_transcription_format()
 
     try:
         if not os.path.exists(download_path):
@@ -1317,6 +1449,7 @@ def download_video_separated():
             selected_options,
             cookie_browser,
             time_range,
+            transcript_format,
         ):
             print("\n✨ ¡Proceso finalizado!")
         else:

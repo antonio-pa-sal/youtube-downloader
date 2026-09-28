@@ -16,6 +16,7 @@ Script de terminal en Python para descargar vídeos desde una URL. Prueba `yt-dl
 - Genera PDFs de transcripcion:
   - con marcas temporales
   - sin marcas temporales, agrupando texto segun puntuacion
+- Permite elegir PDF, Markdown (`.md`) o ambos formatos al solicitar una transcripcion.
 - Si yt-dlp no encuentra una transcripcion, puede generar la original con Whisper MLX en macOS Apple silicon.
 
 ## Requisitos
@@ -118,6 +119,8 @@ Para no usar cookies, deja este ultimo campo vacio. Las cookies se leen localmen
 
 En el menu de descargas, escribe un numero para marcar o desmarcar una opcion. Usa `d` para continuar, `a` para marcar todas, `n` para limpiar la seleccion y `q` para cancelar. Tambien puedes escribir varios numeros, por ejemplo `1,3,6`.
 
+Si eliges una transcripcion, el programa pregunta el formato: `p` para PDF, `m` para Markdown, `a` para generar ambos, o Intro para conservar el formato PDF predeterminado. El Markdown incluye titulo, idioma, fuente, enlace al video, marcas de tiempo y texto agrupado en parrafos. Las opciones del menú de transcripción generan nombres como `<titulo>_transcripcion_original.md`.
+
 ## Ejecutar desde cualquier directorio
 
 En macOS, el comando global `python-youtubedownloader` crea el entorno virtual si falta, comprueba sus dependencias y ejecuta la aplicacion desde cualquier carpeta:
@@ -145,8 +148,10 @@ Segun disponibilidad del video, se generaran archivos como:
 <titulo>_audio_es.mp3
 <titulo>_transcripcion_original.pdf
 <titulo>_transcripcion_original_sin_marcas.pdf
+<titulo>_transcripcion_original.md
 <titulo>_transcripcion_es.pdf
 <titulo>_transcripcion_es_sin_marcas.pdf
+<titulo>_transcripcion_es.md
 ```
 
 ## Notas importantes
