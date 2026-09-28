@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_DIR="/Users/antoniojparedes/Dev/Python/youtube-downloader"
 VENV_DIR="$PROJECT_DIR/venv"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+YT_DLP_VERSION="2026.08.19"
 
 if [[ ! -d "$PROJECT_DIR" ]]; then
   print -u2 "No se encuentra el proyecto en: $PROJECT_DIR"
@@ -15,7 +16,7 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 
-if ! "$VENV_DIR/bin/python" -c 'import certifi, curl_cffi, yt_dlp, yt_dlp_ejs' 2>/dev/null; then
+if ! EXPECTED_YT_DLP_VERSION="$YT_DLP_VERSION" "$VENV_DIR/bin/python" -c 'import certifi, curl_cffi, yt_dlp, yt_dlp_ejs; import os; raise SystemExit(yt_dlp.version.__version__ != os.environ["EXPECTED_YT_DLP_VERSION"])' 2>/dev/null; then
   print "Instalando dependencias del proyecto..."
   "$VENV_DIR/bin/python" -m pip install -q -r "$PROJECT_DIR/requirements.txt"
 fi

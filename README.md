@@ -16,6 +16,7 @@ Script de terminal en Python para descargar vídeos desde una URL. Prueba `yt-dl
 - Genera PDFs de transcripcion:
   - con marcas temporales
   - sin marcas temporales, agrupando texto segun puntuacion
+- Si yt-dlp no encuentra una transcripcion, puede generar la original con Whisper MLX en macOS Apple silicon.
 
 ## Requisitos
 
@@ -29,6 +30,14 @@ Playwright es opcional. Para activarlo:
 python -m pip install playwright
 python -m playwright install chromium
 ```
+
+Whisper MLX tambien es opcional y solo funciona en macOS Apple silicon. Instala el motor junto con las dependencias principales:
+
+```bash
+python -m pip install -r requirements-whisper-mlx.txt
+```
+
+La primera transcripcion descarga el modelo multilingue `whisper-small-mlx` (aprox. 481 MB). Si el motor no esta instalado, la aplicacion avisa y muestra este comando. Whisper detecta el idioma para la transcripcion original; su tarea de traduccion integrada solo produce ingles. Para otros idiomas traducidos se necesitan subtitulos traducidos disponibles.
 
 En macOS con Homebrew:
 
@@ -144,6 +153,7 @@ Segun disponibilidad del video, se generaran archivos como:
 
 - YouTube puede limitar temporalmente la descarga de subtitulos/traducciones con `HTTP Error 429: Too Many Requests`. Si ocurre, espera unos minutos y vuelve a ejecutar.
 - No todos los videos ofrecen pista doblada, subtitulos o traduccion automatica.
+- Si no hay subtitulos, la opcion de transcripcion original puede recurrir a Whisper MLX cuando este instalado en un Mac Apple silicon. El texto se genera automaticamente y conviene revisarlo.
 - Este proyecto depende de extractores de `yt-dlp`; puede necesitar actualizaciones cuando las plataformas cambien su funcionamiento.
 - Si YouTube devuelve `HTTP 403`, la aplicacion prueba varios clientes y formatos. Si persiste, puedes probar con cookies del navegador o configurar un proveedor externo de PO Tokens compatible con `yt-dlp`.
 
@@ -182,6 +192,8 @@ YouTubeDownloader
 bin/ffmpeg
 bin/node
 ```
+
+El ejecutable portable no incluye Whisper MLX. Para usar esa alternativa, ejecuta la version Python desde el entorno virtual e instala `requirements-whisper-mlx.txt`.
 
 En otro Mac Apple silicon, ejecuta desde Terminal:
 

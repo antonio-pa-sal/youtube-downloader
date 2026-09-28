@@ -1,4 +1,5 @@
 import html
+import importlib.util
 import json
 import os
 import shutil
@@ -161,6 +162,7 @@ def run_self_test() -> int:
         import yt_dlp
         print(f"certifi: {certifi.where()}")
         print(f"yt-dlp: {yt_dlp.version.__version__}")
+        print(f"mlx-whisper: {'installed' if importlib.util.find_spec('mlx_whisper') else 'optional / not installed'}")
     except Exception as e:
         print(f"Dependency import failed: {e}")
         return 1
@@ -416,7 +418,52 @@ def find_caption_track(captions: dict, preferred_codes: list[str]):
         json_tracks = [track for track in tracks if track.get("ext") == "json3"]
         if json_tracks:
             return code, json_tracks[0]
+        text_tracks = [track for track in tracks if track.get("ext") in {"vtt", "srt"}]
+        if text_tracks:
+            return code, text_tracks[0]
     return None, None
+
+
+def caption_timestamp_to_ms(value: str) -> int:
+    match = re.search(r"(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})", value)
+    if not match:
+        return 0
+    hours, minutes, seconds, milliseconds = match.groups()
+    return (
+        int(hours or 0) * 3_600_000
+        + int(minutes) * 60_000
+        + int(seconds) * 1_000
+        + int(milliseconds)
+    )
+
+
+def parse_text_caption_file(content: str) -> dict:
+    """Convierte pistas WebVTT/SRT a la estructura interna usada para los PDF."""
+    events = []
+    lines = content.lstrip("\ufeff").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if "-->" not in line:
+            index += 1
+            continue
+        start_time = line.split("-->", 1)[0].strip().split()[0]
+        text_lines = []
+        index += 1
+        while index < len(lines) and lines[index].strip():
+            text = re.sub(r"<[^>]+>", "", lines[index]).strip()
+            if text:
+                text_lines.append(text)
+            index += 1
+        text = html.unescape(" ".join(text_lines)).strip()
+        if text:
+            events.append({
+                "tStartMs": caption_timestamp_to_ms(start_time),
+                "segs": [{"utf8": text}],
+            })
+        index += 1
+    return {"events": events}
+
 
 def download_caption_json(track: dict) -> dict:
     request = urllib.request.Request(
@@ -431,7 +478,10 @@ def download_caption_json(track: dict) -> dict:
         pass
 
     with urllib.request.urlopen(request, timeout=30, context=context) as response:
-        return json.loads(response.read().decode("utf-8"))
+        content = response.read().decode("utf-8-sig")
+    if track.get("ext") == "json3":
+        return json.loads(content)
+    return parse_text_caption_file(content)
 
 def download_caption_json_with_ytdlp(url: str, language_code: str) -> dict:
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -477,43 +527,47 @@ def generate_transcription_pdfs(
     language_code: str,
     selected_options: set[int] | None = None,
     time_range: tuple[int, int] | None = None,
-) -> None:
+) -> set[int]:
     selected_options = selected_options or set()
     transcript_options = selected_options.intersection({1, 2})
     if not transcript_options:
-        return
+        return set()
 
     try:
         from yt_dlp import YoutubeDL
     except ImportError:
         print("⚠️  yt-dlp no está instalado; no se generarán transcripciones PDF.")
-        return
+        return set()
 
-    print("\nGenerando transcripciones PDF desde los subtítulos de YouTube...")
+    print("\nGenerando transcripciones PDF desde los subtítulos disponibles...")
     safe_title = sanitize_filename(title)
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
         "no_warnings": True,
-        "extractor_args": {"youtube": {"player_client": ["android_vr", "web"]}},
     }
+    if urlparse(url).hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android_vr", "web"]}}
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         print(f"⚠️  No se pudieron obtener subtítulos para transcripción: {e}")
-        return
+        return set()
 
-    captions = info.get("automatic_captions") or {}
+    captions = dict(info.get("automatic_captions") or {})
+    captions.update(info.get("subtitles") or {})
     if not captions:
-        print("⚠️  YouTube no devolvió subtítulos automáticos para generar PDF.")
-        return
+        print("⚠️  yt-dlp no devolvió subtítulos para generar PDF.")
+        return set()
 
     transcript_requests = []
     if 1 in transcript_options:
+        audio_language = str(info.get("language") or "").lower().split("-")[0]
+        original_codes = [audio_language] if audio_language else []
         transcript_requests.append(
-            ("original", "Transcripción del audio original", ["en-orig", "en-US", "en"])
+            ("original", "Transcripción del audio original", original_codes + ["original", "en-orig", "en-US", "en"])
         )
     if 2 in transcript_options:
         transcript_requests.append(
@@ -521,6 +575,7 @@ def generate_transcription_pdfs(
         )
 
     created_files = []
+    created_options = set()
     for suffix, heading, codes in transcript_requests:
         code, track = find_caption_track(captions, codes)
         if not track:
@@ -567,9 +622,138 @@ def generate_transcription_pdfs(
         clean_output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}_sin_marcas.pdf")
         write_simple_pdf(clean_output_file, f"{title} - {heading} sin marcas temporales", clean_lines)
         created_files.append(clean_output_file)
+        created_options.add(1 if suffix == "original" else 2)
 
     for file_path in created_files:
         print(f"✅ PDF generado: {file_path}")
+    return created_options
+
+
+def generate_whisper_transcription_pdfs(
+    url: str,
+    download_path: str,
+    title: str,
+    selected_options: set[int],
+    language_code: str,
+    browser: str | None = None,
+    client: str | None = None,
+    time_range: tuple[int, int] | None = None,
+) -> set[int]:
+    """Genera PDFs con Whisper MLX cuando yt-dlp no ofrece la transcripción."""
+    transcript_options = selected_options.intersection({1, 2})
+    if not transcript_options:
+        return set()
+
+    if importlib.util.find_spec("mlx_whisper") is None:
+        print(
+            "ℹ️ Whisper MLX no está instalado. En macOS Apple silicon, actívalo con: "
+            "python -m pip install -r requirements-whisper-mlx.txt"
+        )
+        return set()
+    try:
+        import mlx_whisper
+    except Exception as error:
+        print(f"⚠️ Whisper MLX está instalado, pero no se pudo iniciar en este equipo: {error}")
+        return set()
+
+    requested_tasks = []
+    if 1 in transcript_options:
+        requested_tasks.append((1, "original", "Transcripción del audio original", "transcribe"))
+    if 2 in transcript_options:
+        if language_code in {"en", "eng"}:
+            requested_tasks.append((2, "en", "Transcripción traducida al inglés", "translate"))
+        else:
+            print(
+                "ℹ️ Whisper MLX solo traduce directamente al inglés. "
+                f"No puede generar una traducción al idioma solicitado ({language_code}) sin subtítulos traducidos."
+            )
+    if not requested_tasks:
+        return set()
+
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        print("⚠️ yt-dlp no está instalado; no se puede extraer el audio para Whisper MLX.")
+        return set()
+
+    print("\nNo hay subtítulos disponibles para todas las opciones; generando transcripción local con Whisper MLX...")
+    node_path = find_executable("node")
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(download_path, ".whisper-%(id)s.%(ext)s"),
+    }
+    if browser:
+        ydl_opts["cookiesfrombrowser"] = (browser, None, None, None)
+    if client:
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+    if node_path:
+        ydl_opts.update({
+            "js_runtimes": {"node": {"path": node_path}},
+            "remote_components": ["ejs:github"],
+        })
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="youtube-downloader-whisper-") as temp_dir:
+            ydl_opts["outtmpl"] = os.path.join(temp_dir, "audio.%(ext)s")
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            audio_files = [
+                os.path.join(temp_dir, filename)
+                for filename in os.listdir(temp_dir)
+                if not filename.endswith((".part", ".ytdl"))
+            ]
+            if not audio_files:
+                raise FileNotFoundError("yt-dlp no dejó un archivo de audio utilizable.")
+
+            safe_title = sanitize_filename(title)
+            created_options = set()
+            for option, suffix, heading, task in requested_tasks:
+                whisper_options = {
+                    "path_or_hf_repo": "mlx-community/whisper-small-mlx",
+                    "task": task,
+                    "word_timestamps": False,
+                }
+                if time_range:
+                    whisper_options["clip_timestamps"] = f"{time_range[0]},{time_range[1]}"
+                result = mlx_whisper.transcribe(audio_files[0], **whisper_options)
+                segments = [
+                    (int(float(segment.get("start", 0)) * 1000), str(segment.get("text", "")).strip())
+                    for segment in result.get("segments", [])
+                    if str(segment.get("text", "")).strip()
+                ]
+                full_text = str(result.get("text", "")).strip()
+                if not full_text:
+                    print(f"⚠️ Whisper MLX no detectó voz para: {heading}.")
+                    continue
+
+                transcript_lines = [heading, ""]
+                transcript_lines.extend(
+                    f"[{format_timestamp(start_ms)}] {text}"
+                    for start_ms, text in segments
+                )
+                clean_lines = caption_entries_to_clean_lines(segments, f"{heading} sin marcas temporales")
+                output_file = os.path.join(download_path, f"{safe_title}_transcripcion_{suffix}.pdf")
+                clean_output_file = os.path.join(
+                    download_path,
+                    f"{safe_title}_transcripcion_{suffix}_sin_marcas.pdf",
+                )
+                write_simple_pdf(output_file, f"{title} - {heading} (Whisper MLX)", transcript_lines)
+                write_simple_pdf(
+                    clean_output_file,
+                    f"{title} - {heading} sin marcas temporales (Whisper MLX)",
+                    clean_lines,
+                )
+                print(f"✅ PDF generado con Whisper MLX: {output_file}")
+                print(f"✅ PDF generado con Whisper MLX: {clean_output_file}")
+                created_options.add(option)
+            return created_options
+    except Exception as error:
+        print(f"⚠️ No se pudo generar la transcripción con Whisper MLX: {error}")
+        return set()
 
 def abr_to_int(abr: str | None) -> int:
     """Convierte valores tipo '128kbps' en enteros para comparar calidad."""
@@ -771,10 +955,11 @@ def download_video_with_ytdlp_fallback(
     safe_title = sanitize_filename(title)
     print(f"Título obtenido con yt-dlp: **{title}**")
 
-    is_youtube = str(info.get("extractor_key", "")).lower().startswith("youtube")
-    if is_youtube and selected_options.intersection({1, 2}):
+    transcript_options = selected_options.intersection({1, 2})
+    completed_transcripts = set()
+    if transcript_options:
         try:
-            generate_transcription_pdfs(
+            completed_transcripts = generate_transcription_pdfs(
                 url,
                 download_path,
                 title,
@@ -784,6 +969,19 @@ def download_video_with_ytdlp_fallback(
             )
         except Exception as error:
             print(f"⚠️ No se pudieron generar transcripciones PDF: {error}")
+
+    missing_transcripts = transcript_options - completed_transcripts
+    if missing_transcripts:
+        completed_transcripts |= generate_whisper_transcription_pdfs(
+            url,
+            download_path,
+            title,
+            missing_transcripts,
+            language_code,
+            browser,
+            successful_profile[1],
+            time_range,
+        )
 
     jobs = []
     if 3 in selected_options:
@@ -824,8 +1022,10 @@ def download_video_with_ytdlp_fallback(
         ))
 
     if not jobs:
-        print("✅ Solo se solicitaron transcripciones.")
-        return True
+        if transcript_options and transcript_options.issubset(completed_transcripts):
+            print("✅ Solo se solicitaron transcripciones.")
+            return True
+        return False
 
     download_profiles = [successful_profile] + [
         profile for profile in profiles if profile != successful_profile
@@ -991,7 +1191,33 @@ def report_access_problem(message: str) -> None:
     if any(term in lowered for term in ("drm", "widevine", "fairplay", "playready", "encrypted")):
         print("⛔ El contenido parece estar protegido con DRM; no se puede descargar con este flujo.")
     elif any(term in lowered for term in ("401", "403", "forbidden", "unauthorized", "login", "sign in", "password")):
-        print("🔒 El contenido requiere autenticación, contraseña o permisos de descarga.")
+        print("🔒 El servidor o extractor rechazó la solicitud por autenticación o permisos; esto no confirma por sí solo que el vídeo requiera iniciar sesión.")
+
+
+def vimeo_player_url(url: str) -> str | None:
+    """Construye la URL pública del reproductor para un enlace Vimeo numérico."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in {"vimeo.com", "www.vimeo.com"}:
+        return None
+
+    match = re.fullmatch(
+        r"/(?P<video_id>\d+)(?:/(?P<unlisted_hash>[0-9a-f]{10}))?/?",
+        parsed.path,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    player_path = f"/video/{match.group('video_id')}"
+    if match.group("unlisted_hash"):
+        player_path += f"/{match.group('unlisted_hash')}"
+    player_url = f"https://player.vimeo.com{player_path}"
+    if parsed.query:
+        player_url += f"?{parsed.query}"
+    if parsed.fragment:
+        player_url += f"#{parsed.fragment}"
+    return player_url
 
 
 def download_from_url(
@@ -1013,6 +1239,19 @@ def download_from_url(
         time_range,
     ):
         return True
+
+    player_url = vimeo_player_url(url)
+    if player_url:
+        print("\nReintentando con la URL pública del reproductor de Vimeo...")
+        if download_video_with_ytdlp_fallback(
+            player_url,
+            download_path,
+            language_code,
+            selected_options,
+            browser,
+            time_range,
+        ):
+            return True
 
     print("\nyt-dlp no encontró un extractor funcional; comprobando archivo o stream directo...")
     if download_direct_media(url, download_path, time_range=time_range):
